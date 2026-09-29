@@ -11,6 +11,9 @@ export function passwordMatches(input: string): boolean {
   if (!expected) {
     throw new Error("Не задан APP_PASSWORD. См. .env.example");
   }
+  if (expected.length < 10) {
+    throw new Error("APP_PASSWORD слишком короткий: нужно от 10 символов, лучше фраза из нескольких слов.");
+  }
   return timingSafeEqual(sha(input), sha(expected));
 }
 

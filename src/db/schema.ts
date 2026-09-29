@@ -3,6 +3,7 @@ import {
   boolean,
   check,
   date,
+  index,
   integer,
   numeric,
   pgEnum,
@@ -123,4 +124,15 @@ export const prices = pgTable(
     check("prices_price_positive", sql`${t.price} > 0`),
     check("prices_month_first_day", sql`extract(day from ${t.month}) = 1`),
   ],
+);
+
+/** Неудачные попытки входа: по ним ограничивается перебор пароля (см. src/lib/login-throttle.ts). */
+export const loginAttempts = pgTable(
+  "login_attempts",
+  {
+    id: serial("id").primaryKey(),
+    ip: text("ip").notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("login_attempts_ip_at_idx").on(t.ip, t.at)],
 );
