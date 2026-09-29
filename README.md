@@ -71,7 +71,7 @@ npm run dev
 
 Понадобятся аккаунты GitHub и Vercel. Деньги не нужны: подойдёт бесплатный тариф Hobby.
 
-1. **Код в основной ветке.** Vercel по умолчанию выпускает в продакшн ветку `main`. Слейте в неё ветку с работой (пулл-реквест) или в Vercel откройте Settings → Git и укажите нужную ветку как Production Branch.
+1. **Код.** Весь код уже в ветке `main`, Vercel выпускает в продакшн именно её.
 2. **Проект.** В Vercel: Add New → Project → выберите репозиторий `e-codo/invest`. Next.js определится сам, настройки сборки не трогайте (используется команда `vercel-build`).
 3. **База.** В проекте откройте вкладку Storage → Create Database → Neon (Postgres) → подключите к проекту. Vercel сам добавит переменные `DATABASE_URL` и `DATABASE_URL_UNPOOLED`. Делайте это до первой сборки: она применяет миграции.
 4. **Переменные окружения** (Settings → Environment Variables), для Production:
