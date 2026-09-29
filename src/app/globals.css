@@ -75,6 +75,7 @@
   --color-accent-soft: var(--accent-soft);
   --color-good: var(--good);
   --color-danger: var(--danger);
+  --color-warn: var(--warn);
   --font-sans: var(--font-google-sans), "Onest", system-ui, -apple-system, "Segoe UI", sans-serif;
   --radius-card: var(--radius);
 }

@@ -73,3 +73,34 @@ export async function getRecentTransactions(limit = 10) {
     .orderBy(desc(tables.transactions.date), desc(tables.transactions.id))
     .limit(limit);
 }
+
+/** Все операции, по возрастанию даты. Суммы приведены к числам для расчётов. */
+export async function getAllTransactions() {
+  const db = getDb();
+  const rows = await db
+    .select({
+      id: tables.transactions.id,
+      date: tables.transactions.date,
+      kind: tables.transactions.kind,
+      instrumentId: tables.transactions.instrumentId,
+      quantity: tables.transactions.quantity,
+      price: tables.transactions.price,
+      amount: tables.transactions.amount,
+    })
+    .from(tables.transactions)
+    .orderBy(asc(tables.transactions.date), asc(tables.transactions.id));
+  return rows.map((r) => ({
+    date: r.date,
+    kind: r.kind,
+    instrumentId: r.instrumentId,
+    quantity: r.quantity === null ? null : Number(r.quantity),
+    price: r.price === null ? null : Number(r.price),
+    amount: Number(r.amount),
+  }));
+}
+
+export async function getAllPrices() {
+  const db = getDb();
+  const rows = await db.select().from(tables.prices).orderBy(asc(tables.prices.month));
+  return rows.map((r) => ({ instrumentId: r.instrumentId, month: r.month, price: Number(r.price) }));
+}

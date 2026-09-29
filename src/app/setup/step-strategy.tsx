@@ -64,7 +64,7 @@ export function StepStrategy({ state, update }: Props) {
             ? "Своя стратегия. Задайте доли сами."
             : "Доли можно поменять. Тогда стратегия станет своей."}
         </p>
-        <div className="grid grid-cols-3 items-end gap-3">
+        <div className="grid grid-cols-1 items-end gap-3 min-[340px]:grid-cols-3">
           {FIELDS.map((f) => (
             <div key={f.key} className="flex flex-col gap-1.5">
               <label htmlFor={`pct-${f.key}`} className={labelCls}>

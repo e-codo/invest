@@ -1,0 +1,1 @@
+ALTER TABLE "portfolio" ADD COLUMN "forecast_monthly" numeric(14, 2);

@@ -34,6 +34,8 @@ export const portfolio = pgTable(
     goalAmount: numeric("goal_amount", { precision: 14, scale: 2 }).notNull(),
     /** Ожидаемая доходность для прогноза, % годовых. */
     forecastRate: numeric("forecast_rate", { precision: 5, scale: 2 }).notNull().default("16.00"),
+    /** Ежемесячный взнос в прогнозе, ₽. null: считать по средним взносам из истории. */
+    forecastMonthly: numeric("forecast_monthly", { precision: 14, scale: 2 }),
     onboardedAt: timestamp("onboarded_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
