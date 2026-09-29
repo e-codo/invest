@@ -2,21 +2,9 @@ import * as z from "zod";
 import { todayEkb } from "./dates";
 import { positionKopecks, rubToKopecks } from "./money";
 import { PRESETS, STRATEGY_KEYS } from "./strategies";
-
-const positive = (v: string) => /[1-9]/.test(v);
-
-const amount = z
-  .string()
-  .regex(/^\d{1,12}(\.\d{1,2})?$/, { error: "Сумма указана неверно" })
-  .refine(positive, { error: "Сумма должна быть больше нуля" });
+import { amount, price, quantity, ticker } from "./validators";
 
 const percent = z.number().int().min(0).max(100);
-
-const ticker = z
-  .string()
-  .trim()
-  .toUpperCase()
-  .regex(/^[A-Z0-9._-]{2,12}$/, { error: "Тикер: 2–12 латинских букв или цифр" });
 
 export const setupSchema = z
   .object({
@@ -67,14 +55,8 @@ export const setupSchema = z
           .array(
             z.object({
               ticker,
-              quantity: z
-                .string()
-                .regex(/^\d{1,9}$/, { error: "Количество: целое число" })
-                .refine(positive, { error: "Количество должно быть больше нуля" }),
-              price: z
-                .string()
-                .regex(/^\d{1,9}(\.\d{1,4})?$/, { error: "Цена указана неверно" })
-                .refine(positive, { error: "Цена должна быть больше нуля" }),
+              quantity,
+              price,
             }),
           )
           .min(1),
