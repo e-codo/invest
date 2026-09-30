@@ -3,6 +3,9 @@ import { SignJWT, jwtVerify } from "jose";
 export const SESSION_COOKIE = "session";
 export const SESSION_DAYS = 30;
 
+// Сессии прежней версии несли в sub слово «owner». Такая кука подписана верно, но это не пользователь.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function key() {
   const secret = process.env.SESSION_SECRET;
   if (!secret || secret.length < 32) {
@@ -27,7 +30,7 @@ export async function readSession(token: string | undefined): Promise<string | n
   if (!token) return null;
   try {
     const { payload } = await jwtVerify(token, key(), { algorithms: ["HS256"] });
-    return typeof payload.sub === "string" && payload.sub.length > 0 ? payload.sub : null;
+    return typeof payload.sub === "string" && UUID.test(payload.sub) ? payload.sub : null;
   } catch {
     return null;
   }
