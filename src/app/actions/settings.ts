@@ -118,3 +118,32 @@ export async function saveSettings(input: unknown): Promise<ActionResult> {
   revalidatePath("/settings");
   return { ok: true };
 }
+
+/** Добавляет актив с долей 0% (вне стратегии) прямо из формы месяца. */
+export async function addAsset(name: unknown): Promise<ActionResult> {
+  const userId = await requireUser();
+  if (typeof name !== "string") return fail(DATA_ERROR);
+  const trimmed = name.trim();
+  if (!trimmed) return fail("Введите название актива.");
+  if (trimmed.length > ASSET_NAME_MAX) return fail(`Название не длиннее ${ASSET_NAME_MAX} символов.`);
+
+  try {
+    const db = getDb();
+    const result = await db.transaction(async (tx) => {
+      const rows = await tx.select().from(tables.assets).where(eq(tables.assets.userId, userId));
+      if (rows.length >= 5) return fail("Можно не больше 5 активов.");
+      if (rows.some((a) => a.name.trim().toLowerCase() === trimmed.toLowerCase())) return fail("Актив с таким названием уже есть.");
+      const position = rows.reduce((max, a) => Math.max(max, a.position), -1) + 1;
+      await tx.insert(tables.assets).values({ userId, name: trimmed, weight: 0, position });
+      return { ok: true } as const;
+    });
+    if (result.ok) {
+      revalidatePath("/");
+      revalidatePath("/settings");
+    }
+    return result;
+  } catch (error) {
+    console.error("addAsset failed", error);
+    return fail("Не удалось добавить. Попробуйте ещё раз.");
+  }
+}

@@ -57,10 +57,16 @@ export const settingsInputSchema = z.object({
 });
 export type SettingsInput = z.infer<typeof settingsInputSchema>;
 
+const emailSchema = z.string().trim().toLowerCase().max(254).pipe(z.email("Введите почту в виде name@mail.ru."));
+
+/** Регистрация: правила пароля. */
 export const credentialsSchema = z.object({
-  email: z.string().trim().toLowerCase().max(254).pipe(z.email("Введите почту в виде name@mail.ru.")),
+  email: emailSchema,
   password: z.string().min(8, "Пароль не короче 8 символов.").max(128, "Пароль не длиннее 128 символов."),
 });
+
+/** Вход: правила длины не проверяем, неверный пароль любой длины это обычная неудачная попытка. */
+export const loginSchema = z.object({ email: emailSchema, password: z.string().min(1).max(128) });
 
 export const toKopecks = (rub: number) => Math.round(rub * 100);
 export const fromKopecks = (k: number) => k / 100;

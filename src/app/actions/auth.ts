@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import { getDb, tables } from "@/db";
 import { DEFAULT_ASSETS, DEFAULT_GOAL, DEFAULT_MILESTONES, DEFAULT_PLAN, DEFAULT_TEXTS } from "@/lib/defaults";
 import { dummyHash, hashPassword, verifyPassword } from "@/lib/password";
-import { credentialsSchema, toKopecks } from "@/lib/schemas";
+import { credentialsSchema, loginSchema, toKopecks } from "@/lib/schemas";
 import { createSession, deleteSession } from "@/lib/session";
 import {
   LOGIN_WINDOW_MINUTES,
@@ -22,14 +22,11 @@ export type AuthState = { error?: string; email?: string } | undefined;
 
 const UNAVAILABLE = "Сервис временно недоступен. Проверьте настройки и попробуйте позже.";
 
-function parse(formData: FormData) {
-  return credentialsSchema.safeParse({ email: formData.get("email"), password: formData.get("password") });
-}
+const fields = (formData: FormData) => ({ email: formData.get("email"), password: formData.get("password") });
 
 export async function login(_state: AuthState, formData: FormData): Promise<AuthState> {
   const typed = String(formData.get("email") ?? "");
-  const parsed = parse(formData);
-  // Для входа подробные правила пароля не нужны: любая ошибка формата это просто «не подошло».
+  const parsed = loginSchema.safeParse(fields(formData));
   if (!parsed.success) return { error: "Введите почту и пароль.", email: typed };
   const { email, password } = parsed.data;
 
@@ -62,7 +59,7 @@ export async function login(_state: AuthState, formData: FormData): Promise<Auth
 
 export async function register(_state: AuthState, formData: FormData): Promise<AuthState> {
   const typed = String(formData.get("email") ?? "");
-  const parsed = parse(formData);
+  const parsed = credentialsSchema.safeParse(fields(formData));
   if (!parsed.success) return { error: parsed.error.issues[0]?.message ?? "Проверьте почту и пароль.", email: typed };
   const { email, password } = parsed.data;
 

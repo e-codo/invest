@@ -17,7 +17,7 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = { themeColor: "#E9E5DD" };
 
-export default function RootLayout({ children }: LayoutProps<"/">) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="ru" className={googleSans.variable}>
       <body>

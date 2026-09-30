@@ -185,3 +185,5 @@ textarea.inp { height: auto; min-height: 96px; padding: 12px 14px; resize: verti
 .radio input { margin-top: 4px; accent-color: #222222; }
 ::selection { background: var(--accent); color: var(--on-accent); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+.btn:disabled { opacity: .55; cursor: default; }
+.btn.fill:disabled:hover { background: var(--ink); border-color: var(--ink); color: var(--paper); }
