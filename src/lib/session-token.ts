@@ -6,16 +6,15 @@ export const SESSION_DAYS = 30;
 function key() {
   const secret = process.env.SESSION_SECRET;
   if (!secret || secret.length < 32) {
-    throw new Error(
-      "Не задан SESSION_SECRET (нужна случайная строка от 32 символов). См. .env.example",
-    );
+    throw new Error("Не задан SESSION_SECRET (нужна случайная строка от 32 символов). См. .env.example");
   }
   return new TextEncoder().encode(secret);
 }
 
-export async function signSession(): Promise<{ token: string; expires: Date }> {
+export async function signSession(userId: string): Promise<{ token: string; expires: Date }> {
   const expires = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000);
-  const token = await new SignJWT({ sub: "owner" })
+  const token = await new SignJWT({})
+    .setSubject(userId)
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setExpirationTime(expires)
@@ -23,12 +22,13 @@ export async function signSession(): Promise<{ token: string; expires: Date }> {
   return { token, expires };
 }
 
-export async function isValidSession(token: string | undefined): Promise<boolean> {
-  if (!token) return false;
+/** Возвращает id пользователя из действующей сессии или null. */
+export async function readSession(token: string | undefined): Promise<string | null> {
+  if (!token) return null;
   try {
-    await jwtVerify(token, key(), { algorithms: ["HS256"] });
-    return true;
+    const { payload } = await jwtVerify(token, key(), { algorithms: ["HS256"] });
+    return typeof payload.sub === "string" && payload.sub.length > 0 ? payload.sub : null;
   } catch {
-    return false;
+    return null;
   }
 }

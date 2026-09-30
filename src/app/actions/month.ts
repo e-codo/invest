@@ -1,128 +1,121 @@
 "use server";
 
-import { eq, sql } from "drizzle-orm";
+import { and, eq, gte, lt } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
 import { getDb, tables } from "@/db";
-import { getHoldings, getPortfolio } from "@/lib/data";
-import { monthSchema } from "@/lib/month-schema";
-import { kopecksToDecimal, positionKopecks } from "@/lib/money";
-import { requireSession } from "@/lib/session";
+import { todayEkb } from "@/lib/dates";
+import { monthInputSchema, nextMonth, toKopecks, ymSchema } from "@/lib/schemas";
+import { requireUser } from "@/lib/session";
 
-export type MonthResult = { error: string } | undefined;
+export type ActionResult = { ok: true } | { ok: false; error: string };
 
-/** Сохраняет отметку месяца: взнос, покупки, купоны и цены. Всё одной транзакцией. */
-export async function saveMonth(input: unknown): Promise<MonthResult> {
-  await requireSession();
+const DATA_ERROR = "Проверьте введённые данные.";
 
-  const portfolio = await getPortfolio();
-  if (!portfolio?.onboardedAt) redirect("/setup");
+/** Диапазон дат месяца ГГГГ-ММ для запросов: [с первого числа, с первого числа следующего). */
+const range = (ym: string) => ({ from: `${ym}-01`, to: `${nextMonth(ym)}-01` });
 
-  const parsed = monthSchema.safeParse(input);
-  if (!parsed.success) {
-    return { error: parsed.error.issues[0]?.message ?? "Данные заполнены неверно" };
+/** Сохраняет месяц целиком: всё, что было в нём, заменяется присланным. */
+export async function saveMonth(input: unknown): Promise<ActionResult> {
+  const userId = await requireUser();
+  const parsed = monthInputSchema.safeParse(input);
+  if (!parsed.success) return { ok: false, error: parsed.error.issues[0]?.message ?? DATA_ERROR };
+  const m = parsed.data;
+  const today = todayEkb();
+  const { from, to } = range(m.ym);
+  const inMonth = (d: string) => d >= from && d < to;
+
+  for (const d of m.deposits) {
+    if (!inMonth(d.date)) return { ok: false, error: "Дата взноса должна быть в выбранном месяце." };
+    if (d.date > today) return { ok: false, error: "Дата взноса не может быть в будущем." };
+    if (Object.keys(d.amounts).length === 0) return { ok: false, error: "В взносе нет ни одной суммы." };
   }
-  const data = parsed.data;
+  if (m.value !== null) {
+    if (!m.valueDate || !inMonth(m.valueDate)) return { ok: false, error: "Дата стоимости должна быть в выбранном месяце." };
+  } else if (m.deposits.length > 0) {
+    return { ok: false, error: "Укажите стоимость портфеля: без неё нельзя посчитать прибыль." };
+  }
+  for (const c of m.coupons) if (!inMonth(c.date)) return { ok: false, error: "Дата купона должна быть в выбранном месяце." };
+  for (const r of m.reinvests) if (!inMonth(r.date)) return { ok: false, error: "Дата реинвеста должна быть в выбранном месяце." };
+  if (m.deposits.length === 0 && m.value === null && m.coupons.length === 0 && m.reinvests.length === 0) {
+    return { ok: false, error: "Нечего сохранять: добавьте взнос и стоимость портфеля." };
+  }
+
   const db = getDb();
-
-  const instruments = await db
-    .select({ id: tables.instruments.id, ticker: tables.instruments.ticker, archived: tables.instruments.archived })
-    .from(tables.instruments);
-  const active = new Map(instruments.filter((i) => !i.archived).map((i) => [i.id, i.ticker]));
-
-  const referenced = [
-    ...data.buys.map((b) => b.instrumentId),
-    ...data.incomes.map((i) => i.instrumentId),
-    ...data.prices.map((p) => p.instrumentId),
-  ];
-  if (referenced.some((id) => !active.has(id))) {
-    return { error: "Один из фондов не найден. Обновите страницу и попробуйте снова." };
-  }
-
-  // Для каждой бумаги в портфеле нужна цена на этот месяц: без неё нельзя оценить портфель.
-  const holdings = await getHoldings();
-  const incoming = new Map<number, bigint>();
-  const addQty = (id: number, qty: string) => incoming.set(id, (incoming.get(id) ?? 0n) + BigInt(qty));
-  for (const b of data.buys) addQty(b.instrumentId, b.quantity);
-  for (const i of data.incomes) if (i.reinvest) addQty(i.instrumentId, i.reinvest.quantity);
-  const priced = new Set(data.prices.map((p) => p.instrumentId));
-  for (const [id, ticker] of active) {
-    const held = Number(holdings.get(id) ?? 0) > 0 || (incoming.get(id) ?? 0n) > 0n;
-    if (held && !priced.has(id)) return { error: `Укажите цену для ${ticker}: он есть в портфеле.` };
-  }
-
-  const buyRow = (
-    instrumentId: number,
-    date: string,
-    quantity: string,
-    price: string,
-    note: string | null,
-  ) => ({
-    date,
-    kind: "buy" as const,
-    instrumentId,
-    quantity,
-    price,
-    amount: kopecksToDecimal(positionKopecks(quantity, price)),
-    note,
-  });
-
   try {
     await db.transaction(async (tx) => {
-      if (data.deposit) {
-        await tx.insert(tables.transactions).values({
-          date: data.deposit.date,
-          kind: "deposit",
-          amount: data.deposit.amount,
-        });
-      }
-      if (data.buys.length > 0) {
-        await tx
-          .insert(tables.transactions)
-          .values(data.buys.map((b) => buyRow(b.instrumentId, b.date, b.quantity, b.price, null)));
-      }
-      if (data.incomes.length > 0) {
-        await tx.insert(tables.transactions).values(
-          data.incomes.map((i) => ({
-            date: i.date,
-            kind: "income" as const,
-            instrumentId: i.instrumentId,
-            amount: i.amount,
+      // Активы из формы должны принадлежать этому пользователю.
+      const mine = await tx.select({ id: tables.assets.id }).from(tables.assets).where(eq(tables.assets.userId, userId));
+      const own = new Set(mine.map((a) => String(a.id)));
+      const used = [...m.deposits.flatMap((d) => Object.keys(d.amounts)), ...m.reinvests.map((r) => r.assetId)];
+      if (used.some((id) => !own.has(id))) throw new Error("foreign-asset");
+
+      // Старое содержимое месяца удаляем (позиции взносов уходят каскадом).
+      await tx
+        .delete(tables.contributions)
+        .where(and(eq(tables.contributions.userId, userId), gte(tables.contributions.date, from), lt(tables.contributions.date, to)));
+      await tx.delete(tables.portfolioValues).where(and(eq(tables.portfolioValues.userId, userId), eq(tables.portfolioValues.month, m.ym)));
+      await tx
+        .delete(tables.coupons)
+        .where(and(eq(tables.coupons.userId, userId), gte(tables.coupons.date, from), lt(tables.coupons.date, to)));
+      await tx
+        .delete(tables.reinvests)
+        .where(and(eq(tables.reinvests.userId, userId), gte(tables.reinvests.date, from), lt(tables.reinvests.date, to)));
+
+      for (const d of m.deposits) {
+        const [c] = await tx.insert(tables.contributions).values({ userId, date: d.date }).returning({ id: tables.contributions.id });
+        await tx.insert(tables.contributionItems).values(
+          Object.entries(d.amounts).map(([assetId, amount]) => ({
+            contributionId: c.id,
+            assetId: Number(assetId),
+            amountKopecks: toKopecks(amount),
           })),
         );
-        const reinvested = data.incomes.filter((i) => i.reinvest);
-        if (reinvested.length > 0) {
-          await tx
-            .insert(tables.transactions)
-            .values(
-              reinvested.map((i) => buyRow(i.instrumentId, i.date, i.reinvest!.quantity, i.reinvest!.price, "Реинвест")),
-            );
-        }
       }
-      if (data.prices.length > 0) {
+      if (m.value !== null && m.valueDate) {
+        await tx.insert(tables.portfolioValues).values({ userId, month: m.ym, date: m.valueDate, amountKopecks: toKopecks(m.value) });
+      }
+      if (m.coupons.length) {
+        await tx.insert(tables.coupons).values(m.coupons.map((c) => ({ userId, date: c.date, amountKopecks: toKopecks(c.amount) })));
+      }
+      if (m.reinvests.length) {
         await tx
-          .insert(tables.prices)
-          .values(data.prices.map((p) => ({ instrumentId: p.instrumentId, month: `${data.month}-01`, price: p.price })))
-          .onConflictDoUpdate({
-            target: [tables.prices.instrumentId, tables.prices.month],
-            set: { price: sql`excluded.price` },
-          });
+          .insert(tables.reinvests)
+          .values(m.reinvests.map((r) => ({ userId, date: r.date, amountKopecks: toKopecks(r.amount), assetId: Number(r.assetId) })));
       }
     });
   } catch (error) {
+    if (error instanceof Error && error.message === "foreign-asset") return { ok: false, error: DATA_ERROR };
     console.error("saveMonth failed", error);
-    return { error: "Не удалось сохранить. Попробуйте ещё раз." };
+    return { ok: false, error: "Не удалось сохранить. Попробуйте ещё раз." };
   }
-
   revalidatePath("/");
-  redirect("/");
+  return { ok: true };
 }
 
-/** Удаляет одну операцию. Реинвест купона состоит из двух записей, удалять их нужно по отдельности. */
-export async function deleteTransaction(id: number): Promise<void> {
-  await requireSession();
-  if (!Number.isInteger(id) || id <= 0) return;
+/** Удаляет месяц целиком: взносы, стоимость, купоны и реинвесты. */
+export async function deleteMonth(ym: unknown): Promise<ActionResult> {
+  const userId = await requireUser();
+  const parsed = ymSchema.safeParse(ym);
+  if (!parsed.success) return { ok: false, error: DATA_ERROR };
+  const { from, to } = range(parsed.data);
   const db = getDb();
-  await db.delete(tables.transactions).where(eq(tables.transactions.id, id));
+  try {
+    await db.transaction(async (tx) => {
+      await tx
+        .delete(tables.contributions)
+        .where(and(eq(tables.contributions.userId, userId), gte(tables.contributions.date, from), lt(tables.contributions.date, to)));
+      await tx.delete(tables.portfolioValues).where(and(eq(tables.portfolioValues.userId, userId), eq(tables.portfolioValues.month, parsed.data)));
+      await tx
+        .delete(tables.coupons)
+        .where(and(eq(tables.coupons.userId, userId), gte(tables.coupons.date, from), lt(tables.coupons.date, to)));
+      await tx
+        .delete(tables.reinvests)
+        .where(and(eq(tables.reinvests.userId, userId), gte(tables.reinvests.date, from), lt(tables.reinvests.date, to)));
+    });
+  } catch (error) {
+    console.error("deleteMonth failed", error);
+    return { ok: false, error: "Не удалось удалить. Попробуйте ещё раз." };
+  }
   revalidatePath("/");
+  return { ok: true };
 }

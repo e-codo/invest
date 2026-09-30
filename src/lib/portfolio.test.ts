@@ -1,181 +1,151 @@
 import { describe, expect, it } from "vitest";
-import {
-  addMonths,
-  allocation,
-  averageMonthlyDeposit,
-  buildHistory,
-  depositStreak,
-  forecast,
-  milestoneStates,
-  monthsBetween,
-  xirr,
-  type InstrumentRef,
-  type PricePoint,
-  type Tx,
-} from "./portfolio";
+import { splitContribution, streak, summarize, xirr } from "./portfolio";
+import type { AppState, MonthRecord } from "./types";
 
-const instruments: InstrumentRef[] = [
-  { id: 1, assetClass: "stocks" },
-  { id: 2, assetClass: "bonds" },
-];
+const expect_eq = (a: unknown, b: unknown, msg?: string) => expect(a, msg).toBe(b);
+const expect_deq = (a: unknown, b: unknown) => expect(a).toEqual(b);
+const assertOk = (cond: unknown, msg?: string) => expect(Boolean(cond), msg).toBe(true);
 
-const dep = (date: string, amount: number): Tx => ({ date, kind: "deposit", instrumentId: null, quantity: null, price: null, amount });
-const buy = (date: string, id: number, quantity: number, price: number): Tx => ({
-  date,
-  kind: "buy",
-  instrumentId: id,
-  quantity,
-  price,
-  amount: quantity * price,
+describe("расчёты", () => {
+
+it("при идеальных долях взнос делится по стратегии", () => {
+  expect_deq(splitContribution(18000, [7200, 21600, 7200], [20, 60, 20]), [3600, 10800, 3600]);
 });
-const inc = (date: string, id: number, amount: number): Tx => ({ date, kind: "income", instrumentId: id, quantity: null, price: null, amount });
-
-describe("месяцы", () => {
-  it("сдвиг и разница", () => {
-    expect(addMonths("2026-11", 3)).toBe("2027-02");
-    expect(addMonths("2026-01", -1)).toBe("2025-12");
-    expect(monthsBetween("2025-07", "2026-09")).toBe(14);
-  });
+it("без истории делится по долям", () => {
+  expect_deq(splitContribution(18000, [0, 0, 0], [20, 60, 20]), [3600, 10800, 3600]);
 });
-
-describe("buildHistory", () => {
-  const txs = [
-    dep("2026-01-10", 1000),
-    buy("2026-01-10", 1, 10, 50), // 500
-    buy("2026-01-10", 2, 4, 100), // 400 -> на счёте 100
-    dep("2026-02-10", 1000),
-    inc("2026-02-15", 2, 30),
-    buy("2026-03-05", 1, 5, 60), // 300
-  ];
-  const prices: PricePoint[] = [
-    { instrumentId: 1, month: "2026-01-01", price: 50 },
-    { instrumentId: 2, month: "2026-01-01", price: 100 },
-    { instrumentId: 1, month: "2026-02-01", price: 55 },
-    { instrumentId: 1, month: "2026-03-01", price: 60 },
-  ];
-  const h = buildHistory(txs, prices, instruments, "2026-03");
-
-  it("строит помесячный ряд от первой операции до текущего месяца", () => {
-    expect(h.map((p) => p.month)).toEqual(["2026-01", "2026-02", "2026-03"]);
-  });
-
-  it("считает стоимость, свободные деньги и вложенное", () => {
-    expect(h[0]).toMatchObject({ invested: 1000, cash: 100, value: 1000 });
-    // фев: акции 10*55, облигации 4*100 (цена перенесена), счёт 100+1000+30
-    expect(h[1].byClass).toEqual({ stocks: 550, bonds: 400, cash: 1130 });
-    expect(h[1].value).toBe(2080);
-    // мар: акции 15*60, счёт 1130-300
-    expect(h[2].byClass).toEqual({ stocks: 900, bonds: 400, cash: 830 });
-    expect(h[2].invested).toBe(2000);
-  });
-
-  it("пустой список операций даёт пустой ряд", () => {
-    expect(buildHistory([], [], instruments, "2026-03")).toEqual([]);
-  });
-
-  it("без цен использует цену последней покупки", () => {
-    const only = buildHistory([dep("2026-01-01", 500), buy("2026-01-01", 1, 10, 40)], [], instruments, "2026-01");
-    expect(only[0].byClass.stocks).toBe(400);
-  });
+it("актив выше своей доли получает 0", () => {
+  const r = splitContribution(10000, [50000, 10000, 5000], [20, 60, 20]);
+  expect_eq(r[0], 0);
+  expect_eq(r.reduce((a: number, b: number) => a + b, 0), 10000);
+});
+it("актив вне стратегии получает 0", () => {
+  const r = splitContribution(18000, [1000, 1000, 1000, 9000], [20, 60, 20, 0]);
+  expect_eq(r[3], 0);
+  expect_eq(r.reduce((a: number, b: number) => a + b, 0), 18000);
+});
+it("нет стратегии или нулевой взнос: всё по нулям", () => {
+  expect_deq(splitContribution(18000, [1, 2, 3], [0, 0, 0]), [0, 0, 0]);
+  expect_deq(splitContribution(0, [1, 2, 3], [20, 60, 20]), [0, 0, 0]);
+});
+it("округление: сумма равна взносу ровно, даже когда не делится на доли", () => {
+  const r = splitContribution(10001, [0, 0, 0], [20, 60, 20]);
+  expect_eq(r.reduce((a: number, b: number) => a + b, 0), 10001);
+  r.forEach((v) => assertOk(Number.isInteger(v) && v >= 0));
+});
+it("случайные проверки: сумма = взнос, все неотрицательные целые, вне стратегии 0", () => {
+  let seed = 12345;
+  const rnd = (): number => ((seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296);
+  for (let t = 0; t < 20000; t++) {
+    const cnt = 2 + Math.floor(rnd() * 4);
+    const w = Array.from({ length: cnt }, () => (rnd() < 0.2 ? 0 : 1 + Math.floor(rnd() * 70)));
+    if (w.every((x) => x === 0)) continue;
+    const c = Array.from({ length: cnt }, () => Math.round(rnd() * 500000));
+    const P = 1 + Math.floor(rnd() * 100000);
+    const r = splitContribution(P, c, w);
+    expect_eq(r.reduce((a: number, b: number) => a + b, 0), P, JSON.stringify({ P, c, w, r }));
+    r.forEach((v, i) => {
+      assertOk(Number.isInteger(v) && v >= 0, JSON.stringify({ P, c, w, r }));
+      if (w[i] === 0) expect_eq(v, 0);
+    });
+  }
+});
+it("после взноса получившие выровнены по уровню c/w (с допуском на рубль)", () => {
+  const c = [3000, 20000, 8000];
+  const w = [20, 60, 20];
+  const r = splitContribution(12000, c, w);
+  const lv = r.map((v, i) => (c[i] + v) / w[i]).filter((_, i) => r[i] > 0);
+  lv.forEach((x) => assertOk(Math.abs(x - lv[0]) < 1.5 / 20, JSON.stringify({ r, lv })));
 });
 
-describe("xirr", () => {
-  it("10% за год", () => {
-    const r = xirr([
-      { date: "2025-01-01", amount: -1000 },
-      { date: "2026-01-01", amount: 1100 },
-    ]);
-    expect(r).not.toBeNull();
-    expect(r!).toBeCloseTo(0.1, 3);
-  });
-
-  it("нулевая доходность, если получили ровно вложенное", () => {
-    const r = xirr([
-      { date: "2025-01-01", amount: -500 },
-      { date: "2025-07-01", amount: -500 },
-      { date: "2026-01-01", amount: 1000 },
-    ]);
-    expect(r!).toBeCloseTo(0, 3);
-  });
-
-  it("отрицательная доходность", () => {
-    const r = xirr([
-      { date: "2025-01-01", amount: -1000 },
-      { date: "2026-01-01", amount: 900 },
-    ]);
-    expect(r!).toBeCloseTo(-0.1, 3);
-  });
-
-  it("слишком короткий срок и неполные потоки дают null", () => {
-    expect(xirr([{ date: "2026-01-01", amount: -1000 }, { date: "2026-02-01", amount: 1100 }])).toBeNull();
-    expect(xirr([{ date: "2025-01-01", amount: -1000 }])).toBeNull();
-    expect(xirr([{ date: "2025-01-01", amount: 1000 }, { date: "2026-01-01", amount: 1100 }])).toBeNull();
-  });
+it("XIRR: 10% за год", () => {
+  const r = xirr([{ date: '2025-01-01', amount: -1000 }, { date: '2026-01-01', amount: 1100 }]);
+  assertOk(Math.abs((r as number) - 0.1) < 0.001);
+});
+it("XIRR: меньше 90 дней даёт null (ваши две записи)", () => {
+  expect_eq(xirr([{ date: '2026-08-22', amount: -18000 }, { date: '2026-09-22', amount: -18000 }, { date: '2026-09-22', amount: 36406 }]), null);
+});
+it("серия месяцев", () => {
+  expect_eq(streak(new Set(['2026-08', '2026-09']), '2026-09'), 2);
+  expect_eq(streak(new Set(['2026-08', '2026-09']), '2026-10'), 2);
+  expect_eq(streak(new Set(['2026-06', '2026-09']), '2026-09'), 1);
+  expect_eq(streak(new Set(), '2026-09'), 0);
 });
 
-describe("averageMonthlyDeposit", () => {
-  const txs = [dep("2026-01-05", 100), dep("2026-01-20", 100), dep("2026-02-05", 400), dep("2026-04-05", 300)];
-  it("среднее по последним месяцам со взносами", () => {
-    expect(averageMonthlyDeposit(txs, "2026-04", 6)).toBeCloseTo((200 + 400 + 300) / 3);
-    expect(averageMonthlyDeposit(txs, "2026-04", 2)).toBeCloseTo((400 + 300) / 2);
-  });
-  it("нет взносов: 0", () => {
-    expect(averageMonthlyDeposit([], "2026-04")).toBe(0);
-  });
 });
 
-describe("forecast", () => {
-  it("16% годовых без взносов за 12 месяцев", () => {
-    const { fc, only } = forecast(1000, 800, 0, 16, 12);
-    expect(fc[0]).toBe(1000);
-    expect(fc[12]).toBeCloseTo(1160, 6);
-    expect(only[12]).toBe(800);
-  });
-  it("взносы растут линейно в only и с процентом в fc", () => {
-    const { fc, only } = forecast(0, 0, 100, 12, 24);
-    expect(only[24]).toBe(2400);
-    expect(fc[24]).toBeGreaterThan(2400);
-  });
+const month = (partial: Partial<MonthRecord>): MonthRecord => ({
+  deposits: [],
+  value: null,
+  valueDate: null,
+  coupons: [],
+  reinvests: [],
+  ...partial,
 });
 
-describe("depositStreak", () => {
-  it("считает подряд идущие месяцы", () => {
-    const months = new Set(["2026-06", "2026-07", "2026-08", "2026-09"]);
-    expect(depositStreak(months, "2026-09")).toBe(4);
-  });
-  it("текущий месяц ещё не отмечен: считаем до прошлого", () => {
-    expect(depositStreak(new Set(["2026-07", "2026-08"]), "2026-09")).toBe(2);
-  });
-  it("пропуск обрывает серию", () => {
-    expect(depositStreak(new Set(["2026-05", "2026-07", "2026-08"]), "2026-08")).toBe(2);
-    expect(depositStreak(new Set(["2026-05"]), "2026-09")).toBe(0);
-  });
+const base = (months: Record<string, MonthRecord>): AppState => ({
+  texts: { title: "", subtitle: "", quote: "" },
+  plan: 18000,
+  goal: 3000000,
+  milestones: [],
+  strategy: { enabled: true, name: null },
+  assets: [
+    { id: "1", name: "Акции", weight: 20 },
+    { id: "2", name: "Облигации", weight: 60 },
+    { id: "3", name: "Фонды", weight: 20 },
+  ],
+  months,
 });
 
-describe("milestoneStates", () => {
-  it("отмечает достигнутые и ближайшую", () => {
-    const s = milestoneStates([500, 100, 300], 350);
-    expect(s).toEqual([
-      { amount: 100, done: true, next: false },
-      { amount: 300, done: true, next: false },
-      { amount: 500, done: false, next: true },
-    ]);
+describe("сводка", () => {
+  it("ваши два месяца: вложено, прибыль, доходность", () => {
+    const s = summarize(
+      base({
+        "2026-08": month({ deposits: [{ id: "a", date: "2026-08-22", amounts: { "1": 3600, "2": 10800, "3": 3600 } }], value: 17833, valueDate: "2026-08-22" }),
+        "2026-09": month({ deposits: [{ id: "b", date: "2026-09-22", amounts: { "1": 3600, "2": 10800, "3": 3600 } }], value: 36406, valueDate: "2026-09-22" }),
+      }),
+      "2026-09",
+    );
+    expect(s.invested).toBe(36000);
+    expect(s.value).toBe(36406);
+    expect(s.profit).toBe(406);
+    expect(s.pct).toBeCloseTo(406 / 36000, 10);
+    expect(s.irr).toBeNull();
+    expect(s.streak).toBe(2);
   });
-  it("все вехи пройдены: ближайшей нет", () => {
-    expect(milestoneStates([100], 500).some((m) => m.next)).toBe(false);
-  });
-});
 
-describe("allocation", () => {
-  it("доли и разрыв до цели", () => {
-    const a = allocation({ stocks: 175, bonds: 620, cash: 205 }, { stocks: 20, bonds: 60, cash: 20 });
-    const stocks = a.find((x) => x.key === "stocks")!;
-    expect(stocks.share).toBeCloseTo(17.5);
-    expect(stocks.gapRub).toBeCloseTo(25); // 20% от 1000 минус 175
-    expect(a.find((x) => x.key === "bonds")!.gapRub).toBeCloseTo(-20);
+  it("купон не входит во «вложено», реинвест меняет только аллокацию", () => {
+    const s = summarize(
+      base({
+        "2026-08": month({
+          deposits: [{ id: "a", date: "2026-08-22", amounts: { "1": 1000, "2": 2000 } }],
+          value: 3600,
+          valueDate: "2026-08-30",
+          coupons: [{ id: "c", date: "2026-08-10", amount: 500 }],
+          reinvests: [{ id: "r", date: "2026-08-12", amount: 300, assetId: "2" }],
+        }),
+      }),
+      "2026-08",
+    );
+    expect(s.invested).toBe(3000);
+    expect(s.profit).toBe(600);
+    expect(s.income).toBe(500);
+    expect(s.onAccount).toBe(200);
+    expect(s.base).toEqual({ "1": 1000, "2": 2300, "3": 0 });
   });
-  it("пустой портфель не делит на ноль", () => {
-    const a = allocation({ stocks: 0, bonds: 0, cash: 0 }, { stocks: 20, bonds: 60, cash: 20 });
-    expect(a.every((x) => x.share === 0 && x.gapRub === 0)).toBe(true);
+
+  it("месяц только со стоимостью: взноса нет, календарь его не красит", () => {
+    const s = summarize(base({ "2026-09": month({ value: 5000, valueDate: "2026-09-01" }) }), "2026-09");
+    expect(s.paid.size).toBe(0);
+    expect(s.pct).toBeNull();
+    expect(s.value).toBe(5000);
+  });
+
+  it("пустая история", () => {
+    const s = summarize(base({}), "2026-09");
+    expect(s.value).toBe(0);
+    expect(s.profit).toBe(0);
+    expect(s.pct).toBeNull();
+    expect(s.streak).toBe(0);
   });
 });

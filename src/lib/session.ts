@@ -1,24 +1,9 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { createHash, timingSafeEqual } from "node:crypto";
-import { SESSION_COOKIE, isValidSession, signSession } from "./session-token";
+import { SESSION_COOKIE, readSession, signSession } from "./session-token";
 
-const sha = (value: string) => createHash("sha256").update(value).digest();
-
-/** Сравнение пароля без утечки по времени. */
-export function passwordMatches(input: string): boolean {
-  const expected = process.env.APP_PASSWORD;
-  if (!expected) {
-    throw new Error("Не задан APP_PASSWORD. См. .env.example");
-  }
-  if (expected.length < 10) {
-    throw new Error("APP_PASSWORD слишком короткий: нужно от 10 символов, лучше фраза из нескольких слов.");
-  }
-  return timingSafeEqual(sha(input), sha(expected));
-}
-
-export async function createSession() {
-  const { token, expires } = await signSession();
+export async function createSession(userId: string) {
+  const { token, expires } = await signSession(userId);
   const store = await cookies();
   store.set(SESSION_COOKIE, token, {
     httpOnly: true,
@@ -34,10 +19,13 @@ export async function deleteSession() {
   store.delete(SESSION_COOKIE);
 }
 
-/** Для страниц и действий: если сессии нет, отправляет на вход. */
-export async function requireSession() {
+/**
+ * Для страниц и действий: id текущего пользователя. Все запросы к данным обязаны
+ * фильтровать по нему, так пользователи не видят чужое. Без сессии отправляет на вход.
+ */
+export async function requireUser(): Promise<string> {
   const store = await cookies();
-  if (!(await isValidSession(store.get(SESSION_COOKIE)?.value))) {
-    redirect("/login");
-  }
+  const userId = await readSession(store.get(SESSION_COOKIE)?.value);
+  if (!userId) redirect("/login");
+  return userId;
 }

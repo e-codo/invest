@@ -1,106 +1,74 @@
-import { asc, desc, eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { getDb, tables } from "@/db";
+import { fromKopecks } from "./schemas";
+import type { AppState, MonthRecord } from "./types";
 
-/** Настройки портфеля или undefined, если мастер первого запуска ещё не пройден. */
-export async function getPortfolio() {
-  const db = getDb();
-  const [row] = await db.select().from(tables.portfolio).where(eq(tables.portfolio.id, 1));
-  return row;
-}
+const emptyMonth = (): MonthRecord => ({ deposits: [], value: null, valueDate: null, coupons: [], reinvests: [] });
 
-export async function getMilestones() {
+/** Всё состояние одного пользователя. Каждый запрос фильтруется по userId. */
+export async function loadState(userId: string): Promise<AppState> {
   const db = getDb();
-  return db.select().from(tables.milestones).orderBy(asc(tables.milestones.amount));
-}
+  const [settingsRows, assetRows, milestoneRows, contribRows, itemRows, valueRows, couponRows, reinvestRows] =
+    await Promise.all([
+      db.select().from(tables.settings).where(eq(tables.settings.userId, userId)),
+      db.select().from(tables.assets).where(eq(tables.assets.userId, userId)).orderBy(tables.assets.position, tables.assets.id),
+      db.select().from(tables.milestones).where(eq(tables.milestones.userId, userId)),
+      db.select().from(tables.contributions).where(eq(tables.contributions.userId, userId)),
+      db
+        .select({ item: tables.contributionItems })
+        .from(tables.contributionItems)
+        .innerJoin(tables.contributions, eq(tables.contributions.id, tables.contributionItems.contributionId))
+        .where(eq(tables.contributions.userId, userId)),
+      db.select().from(tables.portfolioValues).where(eq(tables.portfolioValues.userId, userId)),
+      db.select().from(tables.coupons).where(eq(tables.coupons.userId, userId)),
+      db.select().from(tables.reinvests).where(eq(tables.reinvests.userId, userId)),
+    ]);
 
-export async function getInstruments() {
-  const db = getDb();
-  return db
-    .select()
-    .from(tables.instruments)
-    .orderBy(asc(tables.instruments.assetClass), asc(tables.instruments.ticker));
-}
+  const s = settingsRows[0];
+  if (!s) throw new Error("Нет настроек пользователя");
 
-/** Сколько штук каждой бумаги куплено за всё время. Ключ: id бумаги. */
-export async function getHoldings(): Promise<Map<number, string>> {
-  const db = getDb();
-  const rows = await db
-    .select({
-      instrumentId: tables.transactions.instrumentId,
-      quantity: sql<string>`sum(${tables.transactions.quantity})`,
-    })
-    .from(tables.transactions)
-    .where(eq(tables.transactions.kind, "buy"))
-    .groupBy(tables.transactions.instrumentId);
-  return new Map(rows.filter((r) => r.instrumentId !== null).map((r) => [r.instrumentId as number, r.quantity]));
-}
+  const months: Record<string, MonthRecord> = {};
+  const month = (ym: string) => (months[ym] ??= emptyMonth());
 
-/** Последняя известная цена каждой бумаги. Ключ: id бумаги. */
-export async function getLatestPrices(): Promise<Map<number, { month: string; price: string }>> {
-  const db = getDb();
-  const rows = await db.execute<{ instrument_id: number; month: string; price: string }>(
-    sql`select distinct on (instrument_id) instrument_id, month::text as month, price::text as price
-        from prices order by instrument_id, month desc`,
-  );
-  return new Map(Array.from(rows).map((r) => [r.instrument_id, { month: r.month, price: r.price }]));
-}
+  const deposits = new Map<number, { id: string; date: string; amounts: Record<string, number> }>();
+  for (const c of contribRows) {
+    const d = { id: String(c.id), date: c.date, amounts: {} as Record<string, number> };
+    deposits.set(c.id, d);
+    month(c.date.slice(0, 7)).deposits.push(d);
+  }
+  for (const { item } of itemRows) {
+    const d = deposits.get(item.contributionId);
+    if (d) d.amounts[String(item.assetId)] = fromKopecks(item.amountKopecks);
+  }
+  for (const v of valueRows) {
+    const m = month(v.month);
+    m.value = fromKopecks(v.amountKopecks);
+    m.valueDate = v.date;
+  }
+  for (const c of couponRows) {
+    month(c.date.slice(0, 7)).coupons.push({ id: String(c.id), date: c.date, amount: fromKopecks(c.amountKopecks) });
+  }
+  for (const r of reinvestRows) {
+    month(r.date.slice(0, 7)).reinvests.push({
+      id: String(r.id),
+      date: r.date,
+      amount: fromKopecks(r.amountKopecks),
+      assetId: String(r.assetId),
+    });
+  }
+  for (const m of Object.values(months)) {
+    m.deposits.sort((a, b) => a.date.localeCompare(b.date));
+    m.coupons.sort((a, b) => a.date.localeCompare(b.date));
+    m.reinvests.sort((a, b) => a.date.localeCompare(b.date));
+  }
 
-/** Месяцы (первые числа), за которые уже есть отметка цен. */
-export async function getMarkedMonths(): Promise<string[]> {
-  const db = getDb();
-  const rows = await db
-    .selectDistinct({ month: tables.prices.month })
-    .from(tables.prices)
-    .orderBy(desc(tables.prices.month));
-  return rows.map((r) => r.month);
-}
-
-export async function getRecentTransactions(limit = 10) {
-  const db = getDb();
-  return db
-    .select({
-      id: tables.transactions.id,
-      date: tables.transactions.date,
-      kind: tables.transactions.kind,
-      quantity: tables.transactions.quantity,
-      price: tables.transactions.price,
-      amount: tables.transactions.amount,
-      note: tables.transactions.note,
-      ticker: tables.instruments.ticker,
-    })
-    .from(tables.transactions)
-    .leftJoin(tables.instruments, eq(tables.transactions.instrumentId, tables.instruments.id))
-    .orderBy(desc(tables.transactions.date), desc(tables.transactions.id))
-    .limit(limit);
-}
-
-/** Все операции, по возрастанию даты. Суммы приведены к числам для расчётов. */
-export async function getAllTransactions() {
-  const db = getDb();
-  const rows = await db
-    .select({
-      id: tables.transactions.id,
-      date: tables.transactions.date,
-      kind: tables.transactions.kind,
-      instrumentId: tables.transactions.instrumentId,
-      quantity: tables.transactions.quantity,
-      price: tables.transactions.price,
-      amount: tables.transactions.amount,
-    })
-    .from(tables.transactions)
-    .orderBy(asc(tables.transactions.date), asc(tables.transactions.id));
-  return rows.map((r) => ({
-    date: r.date,
-    kind: r.kind,
-    instrumentId: r.instrumentId,
-    quantity: r.quantity === null ? null : Number(r.quantity),
-    price: r.price === null ? null : Number(r.price),
-    amount: Number(r.amount),
-  }));
-}
-
-export async function getAllPrices() {
-  const db = getDb();
-  const rows = await db.select().from(tables.prices).orderBy(asc(tables.prices.month));
-  return rows.map((r) => ({ instrumentId: r.instrumentId, month: r.month, price: Number(r.price) }));
+  return {
+    texts: { title: s.title, subtitle: s.subtitle, quote: s.quote },
+    plan: fromKopecks(s.planKopecks),
+    goal: fromKopecks(s.goalKopecks),
+    milestones: milestoneRows.map((m) => fromKopecks(m.amountKopecks)).sort((a, b) => a - b),
+    strategy: { enabled: s.strategyEnabled, name: s.strategyName },
+    assets: assetRows.map((a) => ({ id: String(a.id), name: a.name, weight: a.weight })),
+    months,
+  };
 }

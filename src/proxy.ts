@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { SESSION_COOKIE, isValidSession } from "./lib/session-token";
+import { SESSION_COOKIE, readSession } from "./lib/session-token";
 
 // Первая линия защиты: без действующей сессии пускаем только на /login.
-// Страницы и действия дополнительно проверяют сессию сами (requireSession).
+// Страницы и действия дополнительно проверяют сессию сами (requireUser).
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  const authed = await isValidSession(request.cookies.get(SESSION_COOKIE)?.value);
+  const authed = (await readSession(request.cookies.get(SESSION_COOKIE)?.value)) !== null;
 
   if (pathname === "/login") {
     return authed ? NextResponse.redirect(new URL("/", request.url)) : NextResponse.next();

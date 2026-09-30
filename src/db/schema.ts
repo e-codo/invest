@@ -1,56 +1,73 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   check,
   date,
   index,
   integer,
-  numeric,
-  pgEnum,
   pgTable,
   serial,
   smallint,
   text,
   timestamp,
   unique,
+  uuid,
 } from "drizzle-orm/pg-core";
 
-export const assetClass = pgEnum("asset_class", ["stocks", "bonds", "cash"]);
-export const txKind = pgEnum("tx_kind", ["deposit", "buy", "income"]);
+// Деньги хранятся целыми копейками (bigint, mode number: до 90 трлн ₽ влезает в Number).
+const kopecks = (name: string) => bigint(name, { mode: "number" });
 
-/** Настройки портфеля. Всегда одна строка (id = 1): приложение для одного человека. */
-export const portfolio = pgTable(
-  "portfolio",
+/** Пользователь. Пароль только в виде хэша с солью (см. src/lib/password.ts). */
+export const users = pgTable(
+  "users",
   {
-    id: smallint("id").primaryKey().default(1),
-    title: text("title").notNull().default("Моя стройка фундамента"),
-    subtitle: text("subtitle").notNull().default("Строю надёжно. Строю по плану. Без спешки."),
-    quote: text("quote")
-      .notNull()
-      .default("«Большие стены складываются из маленьких кирпичей, если класть их регулярно»"),
-    strategyPreset: text("strategy_preset").notNull(),
-    targetStocks: smallint("target_stocks").notNull(),
-    targetBonds: smallint("target_bonds").notNull(),
-    targetCash: smallint("target_cash").notNull(),
-    goalAmount: numeric("goal_amount", { precision: 14, scale: 2 }).notNull(),
-    /** Ожидаемая доходность для прогноза, % годовых. */
-    forecastRate: numeric("forecast_rate", { precision: 5, scale: 2 }).notNull().default("16.00"),
-    /** Ежемесячный взнос в прогнозе, ₽. null: считать по средним взносам из истории. */
-    forecastMonthly: numeric("forecast_monthly", { precision: 14, scale: 2 }),
-    onboardedAt: timestamp("onboarded_at", { withTimezone: true }),
+    id: uuid("id").primaryKey().defaultRandom(),
+    email: text("email").notNull(),
+    passwordHash: text("password_hash").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
+  (t) => [unique("users_email_unique").on(t.email)],
+);
+
+/** Настройки пользователя: одна строка на человека. */
+export const settings = pgTable(
+  "settings",
+  {
+    userId: uuid("user_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    subtitle: text("subtitle").notNull(),
+    quote: text("quote").notNull(),
+    planKopecks: kopecks("plan_kopecks").notNull(),
+    goalKopecks: kopecks("goal_kopecks").notNull(),
+    strategyEnabled: boolean("strategy_enabled").notNull().default(true),
+    /** null: имя собирается из долей само. */
+    strategyName: text("strategy_name"),
+  },
   (t) => [
-    check("portfolio_single_row", sql`${t.id} = 1`),
-    check(
-      "portfolio_targets_sum_100",
-      sql`${t.targetStocks} + ${t.targetBonds} + ${t.targetCash} = 100`,
-    ),
-    check(
-      "portfolio_targets_range",
-      sql`${t.targetStocks} between 0 and 100 and ${t.targetBonds} between 0 and 100 and ${t.targetCash} between 0 and 100`,
-    ),
-    check("portfolio_goal_positive", sql`${t.goalAmount} > 0`),
+    check("settings_plan_positive", sql`${t.planKopecks} > 0`),
+    check("settings_goal_positive", sql`${t.goalKopecks} > 0`),
+  ],
+);
+
+/** Активы («корзины» для взносов). Не больше 5 на пользователя, это проверяет приложение. */
+export const assets = pgTable(
+  "assets",
+  {
+    id: serial("id").primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    /** Доля в стратегии, %. 0: вне стратегии. */
+    weight: smallint("weight").notNull().default(0),
+    position: smallint("position").notNull().default(0),
+  },
+  (t) => [
+    index("assets_user_idx").on(t.userId),
+    check("assets_weight_range", sql`${t.weight} between 0 and 100`),
   ],
 );
 
@@ -59,80 +76,108 @@ export const milestones = pgTable(
   "milestones",
   {
     id: serial("id").primaryKey(),
-    amount: numeric("amount", { precision: 14, scale: 2 }).notNull(),
-  },
-  (t) => [unique("milestones_amount_unique").on(t.amount), check("milestones_amount_positive", sql`${t.amount} > 0`)],
-);
-
-/** Фонды и бумаги, которыми владеет пользователь. */
-export const instruments = pgTable(
-  "instruments",
-  {
-    id: serial("id").primaryKey(),
-    ticker: text("ticker").notNull(),
-    name: text("name").notNull(),
-    assetClass: assetClass("asset_class").notNull(),
-    archived: boolean("archived").notNull().default(false),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [unique("instruments_ticker_unique").on(t.ticker)],
-);
-
-/**
- * Операции. deposit: взнос на счёт. buy: покупка бумаги. income: купон или дивиденд.
- * Реинвест купона это две записи: income и buy в тот же день.
- */
-export const transactions = pgTable(
-  "transactions",
-  {
-    id: serial("id").primaryKey(),
-    date: date("date", { mode: "string" }).notNull(),
-    kind: txKind("kind").notNull(),
-    instrumentId: integer("instrument_id").references(() => instruments.id, { onDelete: "restrict" }),
-    quantity: numeric("quantity", { precision: 18, scale: 6 }),
-    price: numeric("price", { precision: 18, scale: 6 }),
-    amount: numeric("amount", { precision: 14, scale: 2 }).notNull(),
-    note: text("note"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (t) => [
-    check("transactions_amount_positive", sql`${t.amount} > 0`),
-    check(
-      "transactions_instrument_by_kind",
-      sql`(${t.kind} = 'deposit' and ${t.instrumentId} is null) or (${t.kind} <> 'deposit' and ${t.instrumentId} is not null)`,
-    ),
-    check(
-      "transactions_buy_has_qty_price",
-      sql`${t.kind} <> 'buy' or (${t.quantity} > 0 and ${t.price} > 0)`,
-    ),
-  ],
-);
-
-/** Цена бумаги, которую пользователь ввёл при ежемесячной отметке. month это первое число месяца. */
-export const prices = pgTable(
-  "prices",
-  {
-    id: serial("id").primaryKey(),
-    instrumentId: integer("instrument_id")
+    userId: uuid("user_id")
       .notNull()
-      .references(() => instruments.id, { onDelete: "cascade" }),
-    month: date("month", { mode: "string" }).notNull(),
-    price: numeric("price", { precision: 18, scale: 6 }).notNull(),
+      .references(() => users.id, { onDelete: "cascade" }),
+    amountKopecks: kopecks("amount_kopecks").notNull(),
   },
   (t) => [
-    unique("prices_instrument_month_unique").on(t.instrumentId, t.month),
-    check("prices_price_positive", sql`${t.price} > 0`),
-    check("prices_month_first_day", sql`extract(day from ${t.month}) = 1`),
+    unique("milestones_user_amount_unique").on(t.userId, t.amountKopecks),
+    check("milestones_amount_positive", sql`${t.amountKopecks} > 0`),
   ],
 );
 
-/** Неудачные попытки входа: по ним ограничивается перебор пароля (см. src/lib/login-throttle.ts). */
-export const loginAttempts = pgTable(
-  "login_attempts",
+/** Взнос: одна дата, суммы по активам лежат в contribution_items. В месяце их может быть несколько. */
+export const contributions = pgTable(
+  "contributions",
   {
     id: serial("id").primaryKey(),
-    ip: text("ip").notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    date: date("date", { mode: "string" }).notNull(),
+  },
+  (t) => [index("contributions_user_date_idx").on(t.userId, t.date)],
+);
+
+export const contributionItems = pgTable(
+  "contribution_items",
+  {
+    id: serial("id").primaryKey(),
+    contributionId: integer("contribution_id")
+      .notNull()
+      .references(() => contributions.id, { onDelete: "cascade" }),
+    assetId: integer("asset_id")
+      .notNull()
+      .references(() => assets.id, { onDelete: "restrict" }),
+    amountKopecks: kopecks("amount_kopecks").notNull(),
+  },
+  (t) => [
+    unique("contribution_items_unique").on(t.contributionId, t.assetId),
+    check("contribution_items_amount_positive", sql`${t.amountKopecks} > 0`),
+  ],
+);
+
+/** Стоимость портфеля из приложения брокера: одна на месяц. month это ГГГГ-ММ. */
+export const portfolioValues = pgTable(
+  "portfolio_values",
+  {
+    id: serial("id").primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    month: text("month").notNull(),
+    date: date("date", { mode: "string" }).notNull(),
+    amountKopecks: kopecks("amount_kopecks").notNull(),
+  },
+  (t) => [
+    unique("portfolio_values_user_month_unique").on(t.userId, t.month),
+    check("portfolio_values_amount_positive", sql`${t.amountKopecks} > 0`),
+    check("portfolio_values_month_format", sql`${t.month} ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'`),
+  ],
+);
+
+/** Купон: доход портфеля. Во «вложено своих» не входит. */
+export const coupons = pgTable(
+  "coupons",
+  {
+    id: serial("id").primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    date: date("date", { mode: "string" }).notNull(),
+    amountKopecks: kopecks("amount_kopecks").notNull(),
+  },
+  (t) => [index("coupons_user_date_idx").on(t.userId, t.date), check("coupons_amount_positive", sql`${t.amountKopecks} > 0`)],
+);
+
+/** Реинвест купонов: влияет на аллокацию выбранного актива, но не на «вложено своих». */
+export const reinvests = pgTable(
+  "reinvests",
+  {
+    id: serial("id").primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    date: date("date", { mode: "string" }).notNull(),
+    amountKopecks: kopecks("amount_kopecks").notNull(),
+    assetId: integer("asset_id")
+      .notNull()
+      .references(() => assets.id, { onDelete: "restrict" }),
+  },
+  (t) => [index("reinvests_user_date_idx").on(t.userId, t.date), check("reinvests_amount_positive", sql`${t.amountKopecks} > 0`)],
+);
+
+/** Неудачные попытки входа и регистрации: по ним ограничивается перебор (см. src/lib/throttle.ts). */
+export const authAttempts = pgTable(
+  "auth_attempts",
+  {
+    id: serial("id").primaryKey(),
+    /** "login" или "register". */
+    kind: text("kind").notNull(),
+    /** Адрес клиента или почта: ограничение считается по обоим. */
+    subject: text("subject").notNull(),
     at: timestamp("at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("login_attempts_ip_at_idx").on(t.ip, t.at)],
+  (t) => [index("auth_attempts_lookup_idx").on(t.kind, t.subject, t.at)],
 );

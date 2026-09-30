@@ -1,106 +1,57 @@
-// Расчёты по портфелю. Чистые функции без базы данных: всё, что нужно, передаётся аргументами.
-// Суммы здесь обычные числа в рублях: для показа на экране точности с запасом.
+import type { AppState } from "./types";
 
-export type AssetClass = "stocks" | "bonds" | "cash";
+// Расчёты по правилам брифа (разделы 3.2, 3.3, 3.7). Чистые функции без доступа к базе.
 
-export type Tx = {
-  date: string; // ГГГГ-ММ-ДД
-  kind: "deposit" | "buy" | "income";
-  instrumentId: number | null;
-  quantity: number | null;
-  price: number | null;
-  amount: number;
-};
+/**
+ * Раскладывает плановый взнос по активам так, чтобы доли приблизились к стратегии без продаж.
+ * current: сколько денег уже направлено в каждый актив, weights: доли стратегии (могут быть 0),
+ * P: плановый взнос в рублях (целое). Сумма результата равна P ровно, отрицательных нет.
+ */
+export function splitContribution(P: number, current: number[], weights: number[]): number[] {
+  const n = current.length;
+  const out = new Array<number>(n).fill(0);
+  const idx: number[] = [];
+  for (let i = 0; i < n; i++) if (weights[i] > 0) idx.push(i);
+  if (P <= 0 || idx.length === 0) return out;
 
-export type PricePoint = { instrumentId: number; month: string; price: number }; // month: ГГГГ-ММ-01
-
-export type InstrumentRef = { id: number; assetClass: AssetClass };
-
-export type MonthPoint = {
-  month: string; // ГГГГ-ММ
-  invested: number; // всего внесено взносами
-  value: number; // стоимость портфеля, включая свободные деньги
-  cash: number; // свободные деньги на счёте
-  byClass: Record<AssetClass, number>;
-};
-
-export const monthOf = (date: string) => date.slice(0, 7);
-
-export function addMonths(month: string, delta: number): string {
-  const [y, m] = month.split("-").map(Number);
-  const total = y * 12 + (m - 1) + delta;
-  return `${Math.floor(total / 12)}-${String((total % 12) + 1).padStart(2, "0")}`;
-}
-
-export function monthsBetween(from: string, to: string): number {
-  const [fy, fm] = from.split("-").map(Number);
-  const [ty, tm] = to.split("-").map(Number);
-  return (ty - fy) * 12 + (tm - fm);
-}
-
-/** Стоимость портфеля на конец каждого месяца от первой операции до nowMonth. */
-export function buildHistory(
-  txs: Tx[],
-  prices: PricePoint[],
-  instruments: InstrumentRef[],
-  nowMonth: string,
-): MonthPoint[] {
-  if (txs.length === 0) return [];
-  const sorted = [...txs].sort((a, b) => a.date.localeCompare(b.date));
-  const first = monthOf(sorted[0].date);
-  const classOf = new Map(instruments.map((i) => [i.id, i.assetClass]));
-
-  const priceBy = new Map<number, PricePoint[]>();
-  for (const p of prices) (priceBy.get(p.instrumentId) ?? priceBy.set(p.instrumentId, []).get(p.instrumentId)!).push(p);
-  for (const list of priceBy.values()) list.sort((a, b) => a.month.localeCompare(b.month));
-
-  const result: MonthPoint[] = [];
-  const qty = new Map<number, number>();
-  const lastBuyPrice = new Map<number, number>();
-  let invested = 0;
-  let cash = 0;
-  let cursor = 0;
-
-  const span = monthsBetween(first, nowMonth);
-  for (let k = 0; k <= Math.max(span, 0); k++) {
-    const month = addMonths(first, k);
-    while (cursor < sorted.length && monthOf(sorted[cursor].date) <= month) {
-      const t = sorted[cursor++];
-      if (t.kind === "deposit") {
-        invested += t.amount;
-        cash += t.amount;
-      } else if (t.kind === "income") {
-        cash += t.amount;
-      } else if (t.instrumentId !== null && t.quantity !== null) {
-        cash -= t.amount;
-        qty.set(t.instrumentId, (qty.get(t.instrumentId) ?? 0) + t.quantity);
-        if (t.price !== null) lastBuyPrice.set(t.instrumentId, t.price);
-      }
-    }
-
-    const byClass: Record<AssetClass, number> = { stocks: 0, bonds: 0, cash: 0 };
-    for (const [id, q] of qty) {
-      if (q <= 0) continue;
-      const known = (priceBy.get(id) ?? []).filter((p) => monthOf(p.month) <= month);
-      const price = known.length > 0 ? known[known.length - 1].price : (lastBuyPrice.get(id) ?? 0);
-      byClass[classOf.get(id) ?? "cash"] += q * price;
-    }
-    byClass.cash += cash;
-    const value = byClass.stocks + byClass.bonds + byClass.cash;
-    result.push({ month, invested, value, cash, byClass });
+  // Активы по возрастанию «уровня» c/w: сначала те, кому больше всего не хватает.
+  idx.sort((a, b) => current[a] / weights[a] - current[b] / weights[b]);
+  let sumC = 0;
+  let sumW = 0;
+  let level = 0;
+  let k = 0;
+  for (; k < idx.length; k++) {
+    sumC += current[idx[k]];
+    sumW += weights[idx[k]];
+    level = (P + sumC) / sumW;
+    const next = k + 1 < idx.length ? current[idx[k + 1]] / weights[idx[k + 1]] : Infinity;
+    if (level <= next) break;
   }
-  return result;
+  const active = idx.slice(0, Math.min(k + 1, idx.length));
+  const raw = active.map((i) => Math.max(0, level * weights[i] - current[i]));
+
+  // Округление до рубля методом наибольшего остатка, чтобы сумма была ровно P.
+  const floors = raw.map(Math.floor);
+  let rest = P - floors.reduce((s, v) => s + v, 0);
+  const order = raw.map((v, j) => ({ j, frac: v - Math.floor(v) })).sort((a, b) => b.frac - a.frac);
+  for (let t = 0; rest > 0 && t < order.length * 2; t++) {
+    floors[order[t % order.length].j] += 1;
+    rest -= 1;
+  }
+  active.forEach((i, j) => (out[i] = floors[j]));
+  return out;
 }
 
-/** Годовая доходность по датам и суммам потоков (XIRR). null, если посчитать нельзя или рано. */
-export function xirr(flows: { date: string; amount: number }[]): number | null {
+export type Flow = { date: string; amount: number };
+
+/** Годовая доходность (XIRR). null, если посчитать нельзя или история короче 90 дней. */
+export function xirr(flows: Flow[]): number | null {
   if (flows.length < 2) return null;
-  const day = (d: string) => Date.parse(`${d}T00:00:00Z`) / 86_400_000;
+  const day = (d: string) => Date.parse(`${d}T00:00:00Z`) / 86400000;
   const t0 = Math.min(...flows.map((f) => day(f.date)));
   const tN = Math.max(...flows.map((f) => day(f.date)));
-  if (tN - t0 < 90) return null; // слишком короткий срок: годовая цифра ничего не значит
+  if (tN - t0 < 90) return null;
   if (!flows.some((f) => f.amount < 0) || !flows.some((f) => f.amount > 0)) return null;
-
   const npv = (r: number) => flows.reduce((s, f) => s + f.amount / Math.pow(1 + r, (day(f.date) - t0) / 365), 0);
   let lo = -0.99;
   let hi = 10;
@@ -113,64 +64,111 @@ export function xirr(flows: { date: string; amount: number }[]): number | null {
   return (lo + hi) / 2;
 }
 
-/** Средний месячный взнос за последние n месяцев, в которых были взносы. 0, если взносов нет. */
-export function averageMonthlyDeposit(txs: Tx[], nowMonth: string, n = 6): number {
-  const perMonth = new Map<string, number>();
-  for (const t of txs) if (t.kind === "deposit") perMonth.set(monthOf(t.date), (perMonth.get(monthOf(t.date)) ?? 0) + t.amount);
-  const months = [...perMonth.keys()].filter((m) => m <= nowMonth).sort().slice(-n);
-  if (months.length === 0) return 0;
-  return months.reduce((s, m) => s + perMonth.get(m)!, 0) / months.length;
-}
+const shiftMonth = (ym: string, d: number) => {
+  const [y, m] = ym.split("-").map(Number);
+  const t = y * 12 + (m - 1) + d;
+  return `${Math.floor(t / 12)}-${String((t % 12) + 1).padStart(2, "0")}`;
+};
 
-/**
- * Прогноз на months месяцев вперёд. Индекс 0 это сегодня.
- * fc: стоимость при доходности ratePct годовых и ежемесячном взносе. only: те же взносы без дохода.
- */
-export function forecast(
-  currentValue: number,
-  currentInvested: number,
-  monthly: number,
-  ratePct: number,
-  months: number,
-): { fc: number[]; only: number[] } {
-  const rm = Math.pow(1 + ratePct / 100, 1 / 12) - 1;
-  const fc = [currentValue];
-  const only = [currentInvested];
-  for (let i = 1; i <= months; i++) {
-    fc.push((fc[i - 1] + monthly) * (1 + rm));
-    only.push(only[i - 1] + monthly);
+/** Сколько месяцев подряд (считая с текущего или прошлого) был взнос. */
+export function streak(paidMonths: Set<string>, nowYm: string): number {
+  let ym = paidMonths.has(nowYm) ? nowYm : shiftMonth(nowYm, -1);
+  let n = 0;
+  while (paidMonths.has(ym)) {
+    n++;
+    ym = shiftMonth(ym, -1);
   }
-  return { fc, only };
+  return n;
 }
 
-/** Сколько месяцев подряд, заканчивая текущим (или прошлым, если текущий ещё не отмечен), был взнос. */
-export function depositStreak(depositMonths: Set<string>, nowMonth: string): number {
-  let month = depositMonths.has(nowMonth) ? nowMonth : addMonths(nowMonth, -1);
-  let streak = 0;
-  while (depositMonths.has(month)) {
-    streak++;
-    month = addMonths(month, -1);
+export type SeriesPoint = { ym: string; invested: number; value: number | null };
+
+export type Summary = {
+  yms: string[];
+  invested: number;
+  value: number;
+  profit: number;
+  /** Доходность за всё время (доля, 0.1 = 10 %). null, если ничего не вложено. */
+  pct: number | null;
+  irr: number | null;
+  /** Получено купонов. */
+  income: number;
+  /** Купонов на счёте: получено минус реинвестировано. */
+  onAccount: number;
+  /** Деньги, направленные в актив: взносы плюс реинвест. */
+  base: Record<string, number>;
+  paid: Set<string>;
+  series: SeriesPoint[];
+  streak: number;
+};
+
+export function summarize(state: AppState, nowYm: string): Summary {
+  const yms = Object.keys(state.months).sort();
+  const base: Record<string, number> = {};
+  for (const a of state.assets) base[a.id] = 0;
+
+  let invested = 0;
+  let income = 0;
+  let reinvested = 0;
+  const flows: Flow[] = [];
+  const paid = new Set<string>();
+  const series: SeriesPoint[] = [];
+
+  for (const ym of yms) {
+    const m = state.months[ym];
+    for (const d of m.deposits) {
+      let sum = 0;
+      for (const [assetId, v] of Object.entries(d.amounts)) {
+        sum += v;
+        if (assetId in base) base[assetId] += v;
+      }
+      invested += sum;
+      if (sum > 0) {
+        paid.add(ym);
+        flows.push({ date: d.date, amount: -sum });
+      }
+    }
+    for (const c of m.coupons) income += c.amount;
+    for (const r of m.reinvests) {
+      reinvested += r.amount;
+      if (r.assetId in base) base[r.assetId] += r.amount;
+    }
+    series.push({ ym, invested, value: m.value });
   }
-  return streak;
+
+  let last: { value: number; date: string } | null = null;
+  for (let i = yms.length - 1; i >= 0; i--) {
+    const m = state.months[yms[i]];
+    if (m.value !== null && m.valueDate) {
+      last = { value: m.value, date: m.valueDate };
+      break;
+    }
+  }
+  const value = last ? last.value : 0;
+  if (last) flows.push({ date: last.date, amount: value });
+  const profit = value - invested;
+
+  return {
+    yms,
+    invested,
+    value,
+    profit,
+    pct: invested > 0 ? profit / invested : null,
+    irr: last ? xirr(flows) : null,
+    income,
+    onAccount: income - reinvested,
+    base,
+    paid,
+    series,
+    streak: streak(paid, nowYm),
+  };
 }
 
-export type MilestoneState = { amount: number; done: boolean; next: boolean };
-
-/** Вехи по возрастанию: достигнутые и ближайшая. */
-export function milestoneStates(amounts: number[], value: number): MilestoneState[] {
-  const sorted = [...amounts].sort((a, b) => a - b);
-  const nextIndex = sorted.findIndex((a) => a > value);
-  return sorted.map((amount, i) => ({ amount, done: amount <= value, next: i === nextIndex }));
+/** Имя стратегии из долей: «Стратегия 20/60/20». Активы с долей 0 в имя не входят. */
+export function autoStrategyName(weights: number[]): string {
+  return `Стратегия ${weights.filter((w) => w > 0).join("/")}`;
 }
 
-const TARGET_KEYS: AssetClass[] = ["stocks", "bonds", "cash"];
-
-/** Доли по классам в процентах и то, сколько рублей не хватает до цели по каждому классу. */
-export function allocation(byClass: Record<AssetClass, number>, target: Record<AssetClass, number>) {
-  const total = TARGET_KEYS.reduce((s, k) => s + byClass[k], 0);
-  return TARGET_KEYS.map((key) => {
-    const share = total > 0 ? (byClass[key] / total) * 100 : 0;
-    const gap = (target[key] / 100) * total - byClass[key]; // >0: не хватает, <0: избыток
-    return { key, share, target: target[key], gapRub: gap, value: byClass[key] };
-  });
+export function strategyName(state: AppState): string {
+  return state.strategy.name ?? autoStrategyName(state.assets.map((a) => a.weight));
 }

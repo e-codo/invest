@@ -1,58 +1,120 @@
 "use server";
 
-import { eq } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
-import { redirect } from "next/navigation";
 import { getDb, tables } from "@/db";
-import { requireSession } from "@/lib/session";
-import { TEXT_LIMITS, settingsSchema, type TextField } from "@/lib/settings-schema";
+import { ASSET_NAME_MAX, settingsInputSchema, toKopecks } from "@/lib/schemas";
+import { requireUser } from "@/lib/session";
+import type { ActionResult } from "./month";
 
-export type SettingsResult = { error: string } | undefined;
+const DATA_ERROR = "Проверьте введённые данные.";
+const fail = (error: string): ActionResult => ({ ok: false, error });
 
-/** Сохраняет заголовок, подзаголовок или цитату, которые правятся прямо на главной. */
-export async function updateText(field: TextField, value: string): Promise<{ ok: boolean }> {
-  await requireSession();
-  if (!(field in TEXT_LIMITS)) return { ok: false };
-  const text = value.replace(/\s+/g, " ").trim();
-  if (text.length === 0 || text.length > TEXT_LIMITS[field]) return { ok: false };
-  const db = getDb();
-  await db.update(tables.portfolio).set({ [field]: text }).where(eq(tables.portfolio.id, 1));
-  revalidatePath("/");
-  return { ok: true };
-}
+/** Сохраняет настройки целиком: активы (с переносом взносов удалённых), стратегия, план, цель, вехи, тексты. */
+export async function saveSettings(input: unknown): Promise<ActionResult> {
+  const userId = await requireUser();
+  const parsed = settingsInputSchema.safeParse(input);
+  if (!parsed.success) return fail(parsed.error.issues[0]?.message ?? DATA_ERROR);
+  const s = parsed.data;
 
-/** Меняет стратегию, цель, вехи и настройки прогноза. Вехи заменяются целиком. */
-export async function updateSettings(input: unknown): Promise<SettingsResult> {
-  await requireSession();
-  const parsed = settingsSchema.safeParse(input);
-  if (!parsed.success) {
-    return { error: parsed.error.issues[0]?.message ?? "Данные заполнены неверно" };
+  const names = new Set<string>();
+  for (const a of s.assets) {
+    const name = a.name.trim();
+    if (!name) return fail("Название актива не может быть пустым.");
+    if (name.length > ASSET_NAME_MAX) return fail(`Название актива не длиннее ${ASSET_NAME_MAX} символов.`);
+    if (names.has(name.toLowerCase())) return fail(`Названия активов не должны повторяться: «${name}».`);
+    names.add(name.toLowerCase());
   }
-  const data = parsed.data;
+  if (s.strategyEnabled) {
+    const sum = s.assets.reduce((acc, a) => acc + a.weight, 0);
+    if (sum !== 100) return fail(`Сумма долей стратегии сейчас ${sum}%, нужно ровно 100%.`);
+  }
+  if (new Set(s.milestones).size !== s.milestones.length) return fail("Вехи не должны повторяться.");
+  const title = s.texts.title.trim();
+  const subtitle = s.texts.subtitle.trim();
+  const quote = s.texts.quote.trim();
+  if (!title || !subtitle || !quote) return fail("Заголовок, подзаголовок и цитата не могут быть пустыми.");
+  const customName = s.strategyName?.trim() || null;
+
   const db = getDb();
   try {
     await db.transaction(async (tx) => {
-      const updated = await tx
-        .update(tables.portfolio)
+      const mine = await tx.select({ id: tables.assets.id }).from(tables.assets).where(eq(tables.assets.userId, userId));
+      const own = new Set(mine.map((a) => String(a.id)));
+
+      // Новые активы создаём первыми: на них могут ссылаться переносы.
+      const realId = new Map<string, number>();
+      for (const a of s.assets) {
+        if (a.id.startsWith("new:")) {
+          const [row] = await tx
+            .insert(tables.assets)
+            .values({ userId, name: a.name.trim(), weight: a.weight })
+            .returning({ id: tables.assets.id });
+          realId.set(a.id, row.id);
+        } else if (!own.has(a.id)) {
+          throw new Error("foreign-asset");
+        } else {
+          realId.set(a.id, Number(a.id));
+        }
+      }
+      const keptIds = new Set(s.assets.map((a) => realId.get(a.id) as number));
+
+      // Переносы: взносы и реинвесты удалённого актива переходят в выбранный.
+      for (const t of s.transfers) {
+        if (!own.has(t.from)) throw new Error("foreign-asset");
+        const from = Number(t.from);
+        const to = t.to.startsWith("new:") ? realId.get(t.to) : own.has(t.to) ? Number(t.to) : undefined;
+        if (to === undefined || to === from) throw new Error("bad-transfer");
+        // Если в одном взносе есть оба актива, суммы складываются (пара актив+взнос уникальна).
+        await tx.execute(sql`
+          update contribution_items t set amount_kopecks = t.amount_kopecks + f.amount_kopecks
+          from contribution_items f
+          where t.contribution_id = f.contribution_id and t.asset_id = ${to} and f.asset_id = ${from}`);
+        await tx.execute(sql`
+          delete from contribution_items f using contribution_items t
+          where t.contribution_id = f.contribution_id and t.asset_id = ${to} and f.asset_id = ${from}`);
+        await tx.update(tables.contributionItems).set({ assetId: to }).where(eq(tables.contributionItems.assetId, from));
+        await tx
+          .update(tables.reinvests)
+          .set({ assetId: to })
+          .where(and(eq(tables.reinvests.userId, userId), eq(tables.reinvests.assetId, from)));
+      }
+
+      // Удаляем активы, которых нет в итоговом списке. Если на них остались записи, внешний ключ не даст.
+      const removed = mine.map((a) => a.id).filter((id) => !keptIds.has(id));
+      if (removed.length) await tx.delete(tables.assets).where(and(eq(tables.assets.userId, userId), inArray(tables.assets.id, removed)));
+
+      for (const [i, a] of s.assets.entries()) {
+        await tx
+          .update(tables.assets)
+          .set({ name: a.name.trim(), weight: a.weight, position: i })
+          .where(and(eq(tables.assets.userId, userId), eq(tables.assets.id, realId.get(a.id) as number)));
+      }
+
+      await tx
+        .update(tables.settings)
         .set({
-          strategyPreset: data.strategy.preset,
-          targetStocks: data.strategy.stocks,
-          targetBonds: data.strategy.bonds,
-          targetCash: data.strategy.cash,
-          goalAmount: data.goal,
-          forecastRate: data.forecastRate,
-          forecastMonthly: data.forecastMonthly,
+          title,
+          subtitle,
+          quote,
+          planKopecks: toKopecks(s.plan),
+          goalKopecks: toKopecks(s.goal),
+          strategyEnabled: s.strategyEnabled,
+          strategyName: customName,
         })
-        .where(eq(tables.portfolio.id, 1))
-        .returning({ id: tables.portfolio.id });
-      if (updated.length === 0) throw new Error("portfolio not set up");
-      await tx.delete(tables.milestones);
-      await tx.insert(tables.milestones).values(data.milestones.map((amount) => ({ amount })));
+        .where(eq(tables.settings.userId, userId));
+
+      await tx.delete(tables.milestones).where(eq(tables.milestones.userId, userId));
+      if (s.milestones.length) {
+        await tx.insert(tables.milestones).values(s.milestones.map((m) => ({ userId, amountKopecks: toKopecks(m) })));
+      }
     });
   } catch (error) {
-    console.error("updateSettings failed", error);
-    return { error: "Не удалось сохранить. Попробуйте ещё раз." };
+    if (error instanceof Error && (error.message === "foreign-asset" || error.message === "bad-transfer")) return fail(DATA_ERROR);
+    console.error("saveSettings failed", error);
+    return fail("Не удалось сохранить. Попробуйте ещё раз.");
   }
   revalidatePath("/");
-  redirect("/");
+  revalidatePath("/settings");
+  return { ok: true };
 }
