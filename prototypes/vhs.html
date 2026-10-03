@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VHS-эффект — прототип</title>
+<style>
+  :root {
+    --bg: #0e0e12; --panel: #17171d; --line: #2a2a34; --text: #e8e8ee; --muted: #8b8b9a; --accent: #ff4d8d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; }
+  .app { display: grid; grid-template-columns: 1fr 320px; min-height: 100vh; }
+  .stage { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px; gap: 14px; min-width: 0; }
+  .view { position: relative; max-width: 100%; border: 1px solid var(--line); background: #000; }
+  canvas { display: block; max-width: 100%; max-height: 80vh; width: auto; height: auto; }
+  .view.drag { outline: 2px dashed var(--accent); }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  button, .btn { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; font: inherit; cursor: pointer; }
+  button:hover, .btn:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.on { border-color: var(--accent); color: var(--accent); }
+  input[type=file] { display: none; }
+  aside { background: var(--panel); border-left: 1px solid var(--line); padding: 18px; overflow-y: auto; max-height: 100vh; position: sticky; top: 0; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 18px 0 8px; }
+  h2:first-child { margin-top: 0; }
+  .row { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; margin-bottom: 10px; }
+  .row output { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .row input[type=range] { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); }
+  .chk { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .presets { display: flex; gap: 6px; flex-wrap: wrap; }
+  .presets button { padding: 6px 10px; font-size: 13px; }
+  .hint { color: var(--muted); font-size: 12px; }
+  @media (max-width: 800px) {
+    .app { grid-template-columns: 1fr; }
+    aside { position: static; max-height: none; border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <main class="stage">
+    <div class="view" id="view"><canvas id="out"></canvas></div>
+    <div class="bar">
+      <label class="btn" for="file">Загрузить фото</label>
+      <input type="file" id="file" accept="image/*">
+      <button id="play" class="on">Анимация: вкл</button>
+      <button id="hold">Удерживать: оригинал</button>
+      <button id="save" class="primary">Скачать PNG</button>
+    </div>
+    <div class="hint">Можно перетащить фото на картинку. Обработка идёт локально в браузере.</div>
+  </main>
+
+  <aside id="panel">
+    <h2>Пресеты</h2>
+    <div class="presets" id="presets"></div>
+
+    <h2>Цвет</h2>
+    <div id="g-color"></div>
+    <h2>Размытие и цвет</h2>
+    <div id="g-blur"></div>
+    <h2>Искажения</h2>
+    <div id="g-dist"></div>
+    <h2>Шум и линии</h2>
+    <div id="g-noise"></div>
+    <h2>Оверлей</h2>
+    <div class="chk"><input type="checkbox" id="osd" checked><label for="osd">Экранная надпись (PLAY / дата)</label></div>
+    <div class="chk"><input type="checkbox" id="vignette" checked><label for="vignette">Виньетка</label></div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  // ---------- параметры ----------
+  const CONTROLS = {
+    'g-color': [
+      ['brightness', 'Яркость', -50, 50, 1, 0],
+      ['contrast', 'Контраст', 50, 160, 1, 100],
+      ['saturation', 'Насыщенность', 0, 200, 1, 85],
+      ['warmth', 'Тепло / холод', -50, 50, 1, 10],
+      ['fade', 'Выцветание чёрного', 0, 60, 1, 12],
+    ],
+    'g-blur': [
+      ['soften', 'Мягкость (яркость)', 0, 6, 0.5, 1.5],
+      ['bleed', 'Растекание цвета', 0, 30, 1, 12],
+      ['aberration', 'Хроматическая аберрация', 0, 20, 0.5, 3],
+    ],
+    'g-dist': [
+      ['tracking', 'Трекинг (волны)', 0, 100, 1, 30],
+      ['jitter', 'Дрожание строк', 0, 100, 1, 20],
+      ['headswitch', 'Помехи внизу кадра', 0, 100, 1, 40],
+      ['trackbar', 'Бегущая полоса сбоя', 0, 100, 1, 30],
+    ],
+    'g-noise': [
+      ['noise', 'Шум', 0, 100, 1, 25],
+      ['scanlines', 'Строчная развёртка', 0, 100, 1, 30],
+      ['streaks', 'Белые вспышки', 0, 100, 1, 25],
+    ],
+  };
+  const PRESETS = {
+    'Лёгкий': { brightness: 0, contrast: 105, saturation: 95, warmth: 5, fade: 6, soften: 1, bleed: 6, aberration: 1.5, tracking: 10, jitter: 8, headswitch: 20, trackbar: 0, noise: 12, scanlines: 20, streaks: 5 },
+    'VHS 90-х': { brightness: 0, contrast: 100, saturation: 85, warmth: 10, fade: 12, soften: 1.5, bleed: 12, aberration: 3, tracking: 30, jitter: 20, headswitch: 40, trackbar: 30, noise: 25, scanlines: 30, streaks: 25 },
+    'Заезженная кассета': { brightness: -5, contrast: 120, saturation: 65, warmth: 20, fade: 25, soften: 2.5, bleed: 20, aberration: 6, tracking: 70, jitter: 50, headswitch: 80, trackbar: 70, noise: 55, scanlines: 45, streaks: 60 },
+    'Холодный глитч': { brightness: 0, contrast: 115, saturation: 110, warmth: -35, fade: 8, soften: 1, bleed: 15, aberration: 10, tracking: 55, jitter: 35, headswitch: 60, trackbar: 50, noise: 30, scanlines: 35, streaks: 30 },
+  };
+  const P = {};
+  const inputs = {};
+  for (const [gid, list] of Object.entries(CONTROLS)) {
+    const host = document.getElementById(gid);
+    for (const [key, label, min, max, step, def] of list) {
+      P[key] = def;
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = `<label for="p-${key}">${label}</label><output id="o-${key}">${def}</output>` +
+        `<input type="range" id="p-${key}" min="${min}" max="${max}" step="${step}" value="${def}">`;
+      host.appendChild(row);
+      const inp = row.querySelector('input');
+      inputs[key] = inp;
+      inp.addEventListener('input', () => setParam(key, +inp.value));
+    }
+  }
+  const staticKeys = new Set(['brightness', 'contrast', 'saturation', 'warmth', 'fade', 'soften', 'bleed']);
+  let cacheDirty = true;
+  function setParam(key, v) {
+    P[key] = v;
+    inputs[key].value = v;
+    document.getElementById('o-' + key).textContent = v;
+    if (staticKeys.has(key)) cacheDirty = true;
+    needRender = true;
+  }
+  const presetsHost = document.getElementById('presets');
+  for (const [name, vals] of Object.entries(PRESETS)) {
+    const b = document.createElement('button');
+    b.textContent = name;
+    b.onclick = () => { for (const k in vals) setParam(k, vals[k]); };
+    presetsHost.appendChild(b);
+  }
+  const osdEl = document.getElementById('osd');
+  const vigEl = document.getElementById('vignette');
+  osdEl.onchange = vigEl.onchange = () => { needRender = true; };
+
+  // ---------- изображение ----------
+  const out = document.getElementById('out');
+  const ctx = out.getContext('2d');
+  const MAX_W = 960, MAX_H = 720;
+  let W = 0, H = 0, src = null, graded = null;
+  let needRender = true, animate = true, showOriginal = false;
+
+  function loadImage(img) {
+    const s = Math.min(1, MAX_W / img.width, MAX_H / img.height);
+    W = Math.max(2, Math.round(img.width * s));
+    H = Math.max(2, Math.round(img.height * s));
+    out.width = W; out.height = H;
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const cx = c.getContext('2d');
+    cx.drawImage(img, 0, 0, W, H);
+    src = cx.getImageData(0, 0, W, H);
+    cacheDirty = true; needRender = true;
+  }
+
+  function demoImage() {
+    const c = document.createElement('canvas');
+    c.width = 800; c.height = 560;
+    const g = c.getContext('2d');
+    const sky = g.createLinearGradient(0, 0, 0, 340);
+    sky.addColorStop(0, '#1b2a6b'); sky.addColorStop(0.6, '#e8658a'); sky.addColorStop(1, '#ffb36b');
+    g.fillStyle = sky; g.fillRect(0, 0, 800, 560);
+    g.fillStyle = '#ffe9a8'; g.beginPath(); g.arc(560, 250, 70, 0, 7); g.fill();
+    g.fillStyle = '#2a1a4a';
+    g.beginPath(); g.moveTo(0, 340);
+    for (let x = 0; x <= 800; x += 40) g.lineTo(x, 300 + Math.sin(x * 0.02) * 30 + (x % 80 ? 10 : -20));
+    g.lineTo(800, 560); g.lineTo(0, 560); g.fill();
+    const sea = g.createLinearGradient(0, 340, 0, 560);
+    sea.addColorStop(0, '#2b3f8f'); sea.addColorStop(1, '#0b1233');
+    g.fillStyle = sea; g.fillRect(0, 380, 800, 180);
+    g.fillStyle = 'rgba(255,233,168,.5)';
+    for (let i = 0; i < 14; i++) g.fillRect(560 - 60 + i * 3 % 40, 390 + i * 12, 120 - i * 6, 4);
+    g.fillStyle = '#fff'; g.font = 'bold 54px sans-serif'; g.textAlign = 'center';
+    g.fillText('Загрузите своё фото', 400, 500);
+    return c;
+  }
+
+  // ---------- кэш: цвет + размытие (меняется только при смене параметров) ----------
+  function boxBlurRow(arr, w, h, r) {
+    if (r < 1) return arr;
+    const o = new Float32Array(arr.length);
+    const d = r * 2 + 1;
+    for (let y = 0; y < h; y++) {
+      const base = y * w;
+      let sum = 0;
+      for (let i = -r; i <= r; i++) sum += arr[base + Math.min(w - 1, Math.max(0, i))];
+      for (let x = 0; x < w; x++) {
+        o[base + x] = sum / d;
+        sum += arr[base + Math.min(w - 1, x + r + 1)] - arr[base + Math.max(0, x - r)];
+      }
+    }
+    return o;
+  }
+
+  function buildGraded() {
+    const n = W * H, d = src.data;
+    let Y = new Float32Array(n), U = new Float32Array(n), V = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      const r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2];
+      Y[i] = 0.299 * r + 0.587 * g + 0.114 * b;
+      U[i] = (b - Y[i]) * 0.565;
+      V[i] = (r - Y[i]) * 0.713;
+    }
+    Y = boxBlurRow(Y, W, H, Math.round(P.soften));
+    const br = Math.round(P.bleed);
+    U = boxBlurRow(boxBlurRow(U, W, H, br), W, H, br);
+    V = boxBlurRow(boxBlurRow(V, W, H, br), W, H, br);
+
+    const sat = P.saturation / 100, con = P.contrast / 100, bri = P.brightness * 2.55;
+    const fade = P.fade * 1.2, warm = P.warmth * 0.6;
+    const res = new Uint8ClampedArray(n * 4);
+    for (let i = 0; i < n; i++) {
+      let y = (Y[i] - 128) * con + 128 + bri;
+      y = fade + y * (1 - fade / 255);
+      const u = U[i] * sat, v = V[i] * sat;
+      const r = y + v / 0.713 + warm;
+      const b = y + u / 0.565 - warm;
+      const g = (y - 0.299 * (y + v / 0.713) - 0.114 * (y + u / 0.565)) / 0.587;
+      res[i * 4] = r; res[i * 4 + 1] = g; res[i * 4 + 2] = b; res[i * 4 + 3] = 255;
+    }
+    graded = res;
+    cacheDirty = false;
+  }
+
+  // ---------- кадр ----------
+  let seed = 1;
+  const rnd = () => { seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5; return (seed >>> 0) / 4294967296; };
+
+  function render(t) {
+    if (!src) return;
+    if (showOriginal) { ctx.putImageData(src, 0, 0); return; }
+    if (cacheDirty) buildGraded();
+    const frame = ctx.createImageData(W, H);
+    const o = frame.data, g = graded;
+    seed = (Math.floor(t * 24) * 2654435761 + 12345) >>> 0 || 1;
+
+    const trk = P.tracking / 100 * 40, jit = P.jitter / 100 * 6;
+    const hsAmt = P.headswitch / 100, hsRows = Math.round(H * 0.07);
+    const barAmt = P.trackbar / 100;
+    const barY = ((t * 70) % (H * 1.6)) - H * 0.2, barH = H * 0.05;
+    const ca = Math.round(P.aberration);
+    const noiseA = P.noise / 100 * 90;
+    const scan = P.scanlines / 100 * 0.45;
+    const streakChance = P.streaks / 100 * 0.04;
+    const vig = vigEl.checked;
+    const cx = W / 2, cy = H / 2, maxD = Math.hypot(cx, cy);
+    const anim = animate ? t : 0;
+
+    for (let y = 0; y < H; y++) {
+      // смещение строки
+      const w1 = Math.sin(y * 0.03 + anim * 2.1) * Math.sin(y * 0.006 - anim * 0.7);
+      let off = trk * w1 * w1 * w1 + (rnd() - 0.5) * jit * 2;
+      let rowNoise = 0, rowWhite = 0;
+      if (y >= H - hsRows) {
+        const k = (y - (H - hsRows)) / hsRows;
+        off += (rnd() - 0.3) * 60 * hsAmt * k + hsAmt * k * 25;
+        rowNoise = 80 * hsAmt * k;
+      }
+      const bd = y - barY;
+      if (barAmt > 0 && bd >= 0 && bd < barH) {
+        off += (rnd() - 0.5) * 70 * barAmt;
+        rowNoise += 90 * barAmt;
+      }
+      if (rnd() < streakChance * 0.15) rowWhite = 60 + rnd() * 120;
+      off = Math.round(off);
+      const scanMul = (y & 1) ? 1 - scan : 1;
+      const rowBase = y * W;
+      for (let x = 0; x < W; x++) {
+        let xr = x - off + ca, xg = x - off, xb = x - off - ca;
+        xr = xr < 0 ? 0 : xr >= W ? W - 1 : xr;
+        xg = xg < 0 ? 0 : xg >= W ? W - 1 : xg;
+        xb = xb < 0 ? 0 : xb >= W ? W - 1 : xb;
+        const n = (rnd() - 0.5) * (noiseA + rowNoise * 2) + rowWhite * (rnd() > 0.35 ? 1 : 0);
+        let m = scanMul;
+        if (vig) { const dd = Math.hypot(x - cx, y - cy) / maxD; m *= 1 - dd * dd * 0.55; }
+        const i = (rowBase + x) * 4;
+        o[i] = g[(rowBase + xr) * 4] * m + n;
+        o[i + 1] = g[(rowBase + xg) * 4 + 1] * m + n;
+        o[i + 2] = g[(rowBase + xb) * 4 + 2] * m + n;
+        o[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(frame, 0, 0);
+
+    if (osdEl.checked) {
+      const fs = Math.max(14, Math.round(H / 16));
+      ctx.font = `${fs}px "Courier New", monospace`;
+      ctx.textBaseline = 'top';
+      const draw = (txt, x, y, align) => {
+        ctx.textAlign = align;
+        ctx.fillStyle = 'rgba(255,0,60,.55)'; ctx.fillText(txt, x - 2, y);
+        ctx.fillStyle = 'rgba(0,200,255,.55)'; ctx.fillText(txt, x + 2, y);
+        ctx.fillStyle = '#fff'; ctx.fillText(txt, x, y);
+      };
+      const pad = Math.round(W * 0.04);
+      draw('▶ PLAY', pad, pad, 'left');
+      if (Math.floor(anim * 1.5) % 2 === 0 || !animate) draw('●', W - pad, pad, 'right');
+      draw('SP  1:23:45', pad, H - pad - fs, 'left');
+      draw('OCT. 03 1995', W - pad, H - pad - fs, 'right');
+    }
+  }
+
+  // ---------- цикл ----------
+  let last = 0;
+  function loop(ms) {
+    requestAnimationFrame(loop);
+    if (!src) return;
+    if (!animate && !needRender) return;
+    if (animate && ms - last < 1000 / 24 && !needRender) return;
+    last = ms; needRender = false;
+    render(ms / 1000);
+  }
+
+  // ---------- UI ----------
+  const view = document.getElementById('view');
+  const playBtn = document.getElementById('play');
+  playBtn.onclick = () => {
+    animate = !animate;
+    playBtn.textContent = 'Анимация: ' + (animate ? 'вкл' : 'выкл');
+    playBtn.classList.toggle('on', animate);
+    needRender = true;
+  };
+  const holdBtn = document.getElementById('hold');
+  const hold = v => { showOriginal = v; needRender = true; };
+  holdBtn.addEventListener('pointerdown', () => hold(true));
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(e => holdBtn.addEventListener(e, () => hold(false)));
+
+  document.getElementById('save').onclick = () => {
+    const prev = showOriginal; showOriginal = false;
+    render(performance.now() / 1000);
+    out.toBlob(b => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b); a.download = 'vhs.png'; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    }, 'image/png');
+    showOriginal = prev;
+  };
+
+  function fromFile(f) {
+    if (!f || !f.type.startsWith('image/')) return;
+    const url = URL.createObjectURL(f);
+    const img = new Image();
+    img.onload = () => { loadImage(img); URL.revokeObjectURL(url); };
+    img.src = url;
+  }
+  document.getElementById('file').onchange = e => fromFile(e.target.files[0]);
+  view.addEventListener('dragover', e => { e.preventDefault(); view.classList.add('drag'); });
+  view.addEventListener('dragleave', () => view.classList.remove('drag'));
+  view.addEventListener('drop', e => { e.preventDefault(); view.classList.remove('drag'); fromFile(e.dataTransfer.files[0]); });
+
+  loadImage(demoImage());
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
